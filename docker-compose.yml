@@ -1,0 +1,72 @@
+# Local stack: PostgreSQL + RabbitMQ + control plane (API + outbox relay + update consumer)
+# + worker simulator. Start with `make up` (it generates a random-password .env first).
+x-app-env: &app-env
+  AMQP_URL: amqp://controlplane:${RABBITMQ_PASSWORD:?run `make up` to generate .env}@rabbitmq:5672/%2F
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: controlplane
+      POSTGRES_DB: controlplane
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run `make up` to generate .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U controlplane -d controlplane"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: controlplane
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?run `make up` to generate .env}
+    ports:
+      - "15672:15672" # management UI (user: controlplane, password: see .env)
+    volumes:
+      - rabbitdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  api:
+    build: { context: ., target: runtime }
+    image: tenant-control-plane:local
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgresql+psycopg://controlplane:${POSTGRES_PASSWORD}@postgres:5432/controlplane
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    image: tenant-control-plane:local
+    # Extra CLI args can be appended: `docker compose run --rm worker --fail-rate=1`
+    entrypoint: ["python", "-m", "worker_sim"]
+    environment:
+      <<: *app-env
+      WORKER_FAIL_RATE: ${WORKER_FAIL_RATE:-0}
+      WORKER_MIN_DELAY_MS: ${WORKER_MIN_DELAY_MS:-500}
+      WORKER_MAX_DELAY_MS: ${WORKER_MAX_DELAY_MS:-2000}
+      WORKER_DUPLICATE_RATE: ${WORKER_DUPLICATE_RATE:-0}
+      WORKER_OUT_OF_ORDER_RATE: ${WORKER_OUT_OF_ORDER_RATE:-0}
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      api: { condition: service_started }
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  rabbitdata:

@@ -1,0 +1,41 @@
+# Illustrative Kubernetes manifests (EKS-style). Connection strings come from a Secret that you
+# populate from AWS Secrets Manager (External Secrets Operator / CSI driver) -- never from git.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane
+  labels: { app: control-plane }
+spec:
+  replicas: 2 # safe: outbox uses SKIP LOCKED, consumers dedupe on update_id
+  selector:
+    matchLabels: { app: control-plane }
+  template:
+    metadata:
+      labels: { app: control-plane }
+    spec:
+      serviceAccountName: control-plane # IRSA: bind an IAM role here if you use SQS/SNS/Secrets Manager
+      containers:
+        - name: api
+          image: REGISTRY/tenant-control-plane:TAG
+          ports: [{ containerPort: 8000 }]
+          envFrom:
+            - secretRef: { name: control-plane-connections } # DATABASE_URL, AMQP_URL
+          env:
+            - { name: LOG_LEVEL, value: INFO }
+          readinessProbe: { httpGet: { path: /readyz, port: 8000 }, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: 8000 }, periodSeconds: 10 }
+          resources:
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { memory: 384Mi }
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane
+spec:
+  selector: { app: control-plane }
+  ports: [{ port: 80, targetPort: 8000 }]
